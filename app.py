@@ -1,450 +1,597 @@
+"""
+Smart Nutrition Detection System
+=================================
+Upload a food image → YOLOv8 detects food items → estimates weight → shows nutrition.
+
+Dataset: https://www.kaggle.com/datasets/gokulprasantht/nutrition-dataset
+  Place the downloaded CSV as  data/nutrition.csv  next to this file.
+  The app works without it too — it falls back to a built-in nutrition table.
+
+Install:
+    pip install streamlit ultralytics pillow numpy pandas
+
+Run:
+    streamlit run app.py
+"""
+
 import io
+import math
 import time
-import zipfile
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 
-# ── Try to import YOLO ────────────────────────────────────────────────────────
+# ── optional YOLO ─────────────────────────────────────────────────────────────
 try:
     from ultralytics import YOLO
     YOLO_AVAILABLE = True
 except ImportError:
     YOLO_AVAILABLE = False
 
-# ── Page Configuration ────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# PAGE CONFIG
+# ═════════════════════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="Logo Detector",
-    page_icon="🔍",
+    page_title="Smart Nutrition Detection",
+    page_icon="🥗",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# CSS
+# ═════════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,300&family=DM+Mono:wght@400;500&display=swap');
 
-html, body, [class*="css"] { font-family: 'Space Grotesk', sans-serif; }
+html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
+.stApp { background: #f5f1eb; color: #1c1409; }
 
-.main { background: #0d0f14; }
-.stApp { background: linear-gradient(135deg, #0d0f14 0%, #131820 100%); }
-
+/* hero */
+.hero {
+    background: linear-gradient(140deg, #1c1409 0%, #3b2110 55%, #6b3d1e 100%);
+    border-radius: 22px; padding: 52px 56px 44px;
+    margin-bottom: 32px; position: relative; overflow: hidden;
+}
+.hero::after {
+    content:''; position:absolute; top:-60px; right:-60px;
+    width:340px; height:340px; border-radius:50%;
+    background: radial-gradient(circle, rgba(212,163,89,0.22) 0%, transparent 70%);
+}
+.hero-eyebrow {
+    font-family:'DM Mono',monospace; font-size:0.7rem; letter-spacing:4px;
+    color:#d4a359; text-transform:uppercase; margin-bottom:14px;
+}
 .hero-title {
-    font-size: 3rem; font-weight: 700; letter-spacing: -2px;
-    background: linear-gradient(135deg, #00d4ff, #7b61ff, #ff6b6b);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    margin-bottom: 0;
+    font-family:'Playfair Display',serif; font-size:3rem; font-weight:900;
+    color:#fdf6ec; line-height:1.08; margin:0 0 16px;
 }
-.hero-sub {
-    color: #6b7280; font-size: 1.1rem; margin-top: 4px; font-weight: 300;
-}
+.hero-sub { font-size:1rem; color:rgba(253,246,236,0.6); font-weight:300; margin:0; }
 
-.metric-card {
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 12px; padding: 16px 20px;
-    text-align: center;
-}
-.metric-value { font-size: 2rem; font-weight: 700; color: #00d4ff; }
-.metric-label { font-size: 0.75rem; color: #6b7280; text-transform: uppercase; letter-spacing: 1px; }
-
-.detection-badge {
-    display: inline-block;
-    background: rgba(0, 212, 255, 0.1);
-    border: 1px solid rgba(0, 212, 255, 0.3);
-    color: #00d4ff;
-    border-radius: 20px;
-    padding: 4px 14px;
-    font-size: 0.85rem;
-    font-family: 'JetBrains Mono', monospace;
-    margin: 3px;
-}
-.conf-high   { background: rgba(52,211,153,0.12); border-color: rgba(52,211,153,0.4); color: #34d399; }
-.conf-medium { background: rgba(251,191,36,0.12);  border-color: rgba(251,191,36,0.4);  color: #fbbf24; }
-.conf-low    { background: rgba(239,68,68,0.12);   border-color: rgba(239,68,68,0.4);   color: #ef4444; }
-
-.sidebar-section {
-    background: rgba(255,255,255,0.04);
-    border-radius: 10px; padding: 16px; margin-bottom: 12px;
-    border: 1px solid rgba(255,255,255,0.06);
+/* section header */
+.sec-head {
+    font-family:'Playfair Display',serif; font-size:1.35rem; font-weight:700;
+    color:#1c1409; margin:0 0 14px; display:flex; align-items:center; gap:9px;
 }
 
-.status-ok   { color: #34d399; }
-.status-warn { color: #fbbf24; }
-.status-err  { color: #ef4444; }
+/* calorie hero */
+.cal-hero {
+    background: linear-gradient(130deg,#d4a359,#b8722a);
+    border-radius:16px; padding:26px 32px;
+    display:flex; align-items:flex-end; justify-content:space-between;
+    margin-bottom:20px;
+}
+.cal-num {
+    font-family:'Playfair Display',serif; font-size:3.6rem;
+    font-weight:900; color:#fff; line-height:1;
+}
+.cal-unit { font-size:1.1rem; color:rgba(255,255,255,0.7); margin-left:6px; }
+.cal-label {
+    font-family:'DM Mono',monospace; font-size:0.68rem;
+    letter-spacing:3px; text-transform:uppercase; color:rgba(255,255,255,0.65);
+    margin-bottom:6px;
+}
+.cal-note { font-size:0.82rem; color:rgba(255,255,255,0.55); font-style:italic; }
 
-.info-box {
-    background: rgba(0,212,255,0.07);
-    border-left: 3px solid #00d4ff;
-    border-radius: 0 8px 8px 0;
-    padding: 12px 16px; margin: 8px 0;
-    font-size: 0.9rem; color: #a0aec0;
+/* macro chips */
+.macro-strip { display:flex; gap:10px; flex-wrap:wrap; margin-top:8px; }
+.macro-chip { border-radius:30px; padding:5px 14px; font-size:0.8rem; font-weight:500; }
+.mc-carb { background:#fce8b2; color:#7a4a00; }
+.mc-prot { background:#b3dcfd; color:#003d6b; }
+.mc-fat  { background:#fdd5b3; color:#7a2a00; }
+.mc-fib  { background:#c9f7d4; color:#0a5c1e; }
+.mc-cal  { background:#f5e6c8; color:#5c3a00; font-weight:600; }
+
+/* confidence badge */
+.conf { border-radius:20px; padding:2px 10px; font-size:0.75rem;
+        font-family:'DM Mono',monospace; font-weight:500; }
+.conf-h { background:#d4edda; color:#155724; }
+.conf-m { background:#fff3cd; color:#856404; }
+.conf-l { background:#f8d7da; color:#721c24; }
+
+/* tip box */
+.tip {
+    background:#fdf6ec; border-left:4px solid #d4a359;
+    border-radius:0 10px 10px 0; padding:12px 16px;
+    font-size:0.88rem; color:#6b4226; margin:12px 0;
 }
 
-hr { border-color: rgba(255,255,255,0.08) !important; }
+/* sidebar */
+section[data-testid="stSidebar"] > div:first-child { background: #1c1409 !important; }
+section[data-testid="stSidebar"] * { color: #fdf6ec !important; }
+section[data-testid="stSidebar"] hr { border-color: rgba(212,163,89,0.25) !important; }
+
+/* hide chrome */
+#MainMenu, footer { visibility:hidden; }
+div[data-testid="stDecoration"] { display:none; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-LOGO_CLASSES = [
-    'adidas', 'apple', 'bmw', 'cocacola', 'fedex',
-    'ferrari', 'ford', 'google', 'gucci', 'hp'
-]
-
-CLASS_COLORS = {
-    'adidas':   (30,  30,  30),
-    'apple':    (180,180,180),
-    'bmw':      (0,  80, 200),
-    'cocacola': (220, 20,  20),
-    'fedex':    (100,  0, 220),
-    'ferrari':  (220, 30,  30),
-    'ford':     (0,  40, 160),
-    'google':   (0,  160, 60),
-    'gucci':    (20,  90,  20),
-    'hp':       (0,  100, 200),
+# ═════════════════════════════════════════════════════════════════════════════
+# BUILT-IN NUTRITION TABLE (per 100 g)
+# Covers all COCO food-related classes + common extras.
+# Used when Kaggle CSV is absent OR item not found in it.
+# ═════════════════════════════════════════════════════════════════════════════
+BUILTIN_NUTRITION = {
+    "banana":     {"calories":89,  "proteins":1.1, "carbohydrates":23.0,"fat":0.3, "fiber":2.6},
+    "apple":      {"calories":52,  "proteins":0.3, "carbohydrates":14.0,"fat":0.2, "fiber":2.4},
+    "orange":     {"calories":47,  "proteins":0.9, "carbohydrates":12.0,"fat":0.1, "fiber":2.4},
+    "broccoli":   {"calories":34,  "proteins":2.8, "carbohydrates":6.6, "fat":0.4, "fiber":2.6},
+    "carrot":     {"calories":41,  "proteins":0.9, "carbohydrates":10.0,"fat":0.2, "fiber":2.8},
+    "pizza":      {"calories":266, "proteins":11.0,"carbohydrates":33.0,"fat":10.0,"fiber":2.3},
+    "sandwich":   {"calories":250, "proteins":11.0,"carbohydrates":33.0,"fat":9.0, "fiber":2.0},
+    "hot dog":    {"calories":290, "proteins":10.5,"carbohydrates":24.0,"fat":17.0,"fiber":0.9},
+    "cake":       {"calories":347, "proteins":5.0, "carbohydrates":53.0,"fat":14.0,"fiber":0.9},
+    "donut":      {"calories":452, "proteins":4.9, "carbohydrates":51.0,"fat":25.0,"fiber":1.7},
+    "bottle":     {"calories":0,   "proteins":0.0, "carbohydrates":0.0, "fat":0.0, "fiber":0.0},
+    "wine glass": {"calories":83,  "proteins":0.1, "carbohydrates":2.6, "fat":0.0, "fiber":0.0},
+    "cup":        {"calories":2,   "proteins":0.0, "carbohydrates":0.4, "fat":0.0, "fiber":0.0},
+    "bowl":       {"calories":120, "proteins":5.0, "carbohydrates":18.0,"fat":3.5, "fiber":2.0},
+    "_default":   {"calories":150, "proteins":5.0, "carbohydrates":20.0,"fat":5.0, "fiber":2.0},
 }
 
-MODEL_PATH = Path('model/best.pt')
+FOOD_CLASSES = {
+    "banana","apple","sandwich","orange","broccoli",
+    "carrot","hot dog","pizza","donut","cake",
+    "bowl","bottle","cup","wine glass",
+}
+
+BOX_COLORS = {
+    "banana":(255,200,30), "apple":(220,50,50),   "orange":(255,140,0),
+    "broccoli":(50,180,50),"carrot":(255,110,30),  "pizza":(200,80,20),
+    "sandwich":(200,160,60),"hot dog":(210,100,40),"cake":(220,120,180),
+    "donut":(230,150,80),  "bowl":(140,100,60),    "bottle":(80,160,220),
+    "wine glass":(160,80,200),"cup":(100,180,200),
+}
+DEFAULT_COLOR = (100,160,240)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner=False)
-def load_model(path: str):
-    """Load and cache YOLO model."""
-    return YOLO(path)
+# ═════════════════════════════════════════════════════════════════════════════
+# LOAD KAGGLE DATASET
+# Columns expected (case-insensitive):
+#   name, calories, proteins, fat, carbohydrates, fiber
+# ═════════════════════════════════════════════════════════════════════════════
+DATASET_PATH = Path("nutrition.csv")
 
-
-def get_conf_class(conf: float) -> str:
-    if conf >= 0.70:
-        return 'conf-high'
-    elif conf >= 0.45:
-        return 'conf-medium'
-    return 'conf-low'
-
-
-def draw_detections(image_np: np.ndarray, detections: list) -> np.ndarray:
-    """Draw bounding boxes and labels on image using Pillow."""
-    img_pil = Image.fromarray(image_np)
-    draw = ImageDraw.Draw(img_pil)
-    h, w = image_np.shape[:2]
-
-    # Try to load a truetype font; fall back to default
+@st.cache_data(show_spinner=False)
+def load_nutrition_csv(path: Path):
+    if not path.exists():
+        return None
     try:
-        font_size = max(12, int(min(h, w) / 40))
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+        df = pd.read_csv(path)
+        df.columns = [c.strip().lower() for c in df.columns]
+        renames = {
+            "protein":"proteins","carbs":"carbohydrates",
+            "carbohydrate":"carbohydrates","fibre":"fiber",
+            "calorie":"calories","kcal":"calories",
+        }
+        df.rename(columns=renames, inplace=True)
+        if not {"name","calories","proteins","fat","carbohydrates"}.issubset(df.columns):
+            return None
+        if "fiber" not in df.columns:
+            df["fiber"] = 0.0
+        df["name_lower"] = df["name"].str.lower().str.strip()
+        return df
+    except Exception:
+        return None
+
+
+def lookup_nutrition(label: str, csv_df) -> dict:
+    """CSV (exact → partial) → built-in → default."""
+    key = label.lower().strip()
+    if csv_df is not None:
+        exact = csv_df[csv_df["name_lower"] == key]
+        if not exact.empty:
+            r = exact.iloc[0]
+            return {c: float(r.get(c, 0)) for c in
+                    ["calories","proteins","carbohydrates","fat","fiber"]}
+        partial = csv_df[csv_df["name_lower"].str.contains(key, na=False)]
+        if not partial.empty:
+            r = partial.iloc[0]
+            return {c: float(r.get(c, 0)) for c in
+                    ["calories","proteins","carbohydrates","fat","fiber"]}
+    return dict(BUILTIN_NUTRITION.get(key, BUILTIN_NUTRITION["_default"]))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# WEIGHT ESTIMATION
+# Heuristic: a bounding box covering ~15% of image area ≈ hint_weight grams.
+# Scales with sqrt of area fraction (approximates volume scaling).
+# ═════════════════════════════════════════════════════════════════════════════
+WEIGHT_HINTS = {
+    "banana":150,"apple":180,"orange":160,"broccoli":200,
+    "carrot":100,"pizza":200,"sandwich":200,"hot dog":120,
+    "cake":120,"donut":80,"bowl":300,"bottle":500,
+    "wine glass":150,"cup":240,
+}
+
+def estimate_weight(label: str, box_area: int, img_area: int) -> float:
+    hint = WEIGHT_HINTS.get(label.lower(), 150)
+    ref  = 0.15
+    frac = max(0.01, min(box_area / max(img_area, 1), 0.9))
+    return round(max(10.0, min(hint * math.sqrt(frac / ref), 1000.0)), 1)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DRAWING  (Pillow — zero cv2)
+# ═════════════════════════════════════════════════════════════════════════════
+def draw_boxes(image_np: np.ndarray, detections: list) -> np.ndarray:
+    img  = Image.fromarray(image_np)
+    draw = ImageDraw.Draw(img)
+    h, w = image_np.shape[:2]
+    thick = max(2, w // 280)
+    fsz   = max(13, w // 45)
+    try:
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", fsz)
     except Exception:
         font = ImageFont.load_default()
 
-    thickness = max(2, int(min(h, w) / 300))
+    for d in detections:
+        x1,y1,x2,y2 = d["box"]
+        color = BOX_COLORS.get(d["class"].lower(), DEFAULT_COLOR)
+        for t in range(thick):
+            draw.rectangle([x1-t,y1-t,x2+t,y2+t], outline=color)
+        text = f'{d["class"].upper()}  {d["confidence"]:.0%}  ~{d["weight_g"]}g'
+        bb   = draw.textbbox((0,0), text, font=font)
+        tw, th = bb[2]-bb[0], bb[3]-bb[1]
+        ly = max(y1 - th - 8, 0)
+        draw.rectangle([x1, ly, x1+tw+10, ly+th+6], fill=color)
+        draw.text((x1+5, ly+3), text, fill=(255,255,255), font=font)
 
-    for det in detections:
-        x1, y1, x2, y2 = det['box']
-        cls_name = det['class']
-        conf     = det['confidence']
-
-        color = CLASS_COLORS.get(cls_name, (0, 200, 255))
-
-        # Bounding box
-        for t in range(thickness):
-            draw.rectangle([x1 - t, y1 - t, x2 + t, y2 + t], outline=color)
-
-        # Label text
-        label = f'{cls_name.upper()}  {conf:.0%}'
-        bbox = draw.textbbox((0, 0), label, font=font)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-
-        label_y = max(y1 - th - 6, 0)
-        draw.rectangle([x1, label_y, x1 + tw + 8, label_y + th + 4], fill=color)
-        draw.text((x1 + 4, label_y + 2), label, fill=(255, 255, 255), font=font)
-
-    return np.array(img_pil)
+    return np.array(img)
 
 
-def run_inference(model, image_np: np.ndarray, conf_thresh: float,
-                  iou_thresh: float) -> tuple[np.ndarray, list]:
-    """Run YOLO inference and return annotated image + detection list."""
-    results = model.predict(
-        image_np,
-        conf=conf_thresh,
-        iou=iou_thresh,
-        verbose=False,
-    )
+# ═════════════════════════════════════════════════════════════════════════════
+# YOLO INFERENCE
+# ═════════════════════════════════════════════════════════════════════════════
+@st.cache_resource(show_spinner=False)
+def load_yolo():
+    if not YOLO_AVAILABLE:
+        return None
+    try:
+        return YOLO("yolov8n.pt")   # auto-downloads ~6 MB
+    except Exception:
+        return None
+
+
+def run_yolo(model, image_np, conf_thresh, iou_thresh, csv_df, food_only):
+    h, w  = image_np.shape[:2]
+    img_a = h * w
+    results    = model.predict(image_np, conf=conf_thresh, iou=iou_thresh, verbose=False)
     detections = []
     for r in results:
-        boxes = r.boxes
-        if boxes is None:
+        if r.boxes is None:
             continue
-        for box in boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+        for box in r.boxes:
+            x1,y1,x2,y2 = map(int, box.xyxy[0].tolist())
             cls_idx  = int(box.cls[0].item())
-            cls_name = (LOGO_CLASSES[cls_idx]
-                        if cls_idx < len(LOGO_CLASSES)
-                        else f'class_{cls_idx}')
-            conf = float(box.conf[0].item())
-            detections.append({
-                'box':        (x1, y1, x2, y2),
-                'class':      cls_name,
-                'confidence': conf,
-                'class_idx':  cls_idx,
-            })
+            cls_name = model.names.get(cls_idx, f"class_{cls_idx}")
+            conf     = float(box.conf[0].item())
+            if food_only and cls_name.lower() not in FOOD_CLASSES:
+                continue
+            weight = estimate_weight(cls_name, (x2-x1)*(y2-y1), img_a)
+            n100   = lookup_nutrition(cls_name, csv_df)
+            factor = weight / 100.0
+            nutr   = {k: round(v*factor, 1) for k,v in n100.items()}
+            detections.append({"box":(x1,y1,x2,y2),"class":cls_name,
+                "confidence":conf,"weight_g":weight,
+                "nutrition_per100g":n100,"nutrition":nutr})
+    return draw_boxes(image_np, detections), detections
 
-    annotated = draw_detections(image_np, detections)
-    return annotated, detections
 
-
-def demo_inference(image_np: np.ndarray) -> tuple[np.ndarray, list]:
-    """Produce fake detections when no real model is loaded (demo mode)."""
-    h, w = image_np.shape[:2]
+def demo_run(image_np, csv_df, food_only):
     import random
-    random.seed(int(np.mean(image_np)))
-    n = random.randint(1, 3)
-    detections = []
-    for _ in range(n):
-        cls_name = random.choice(LOGO_CLASSES)
-        bw = random.randint(w//5, w//2)
-        bh = random.randint(h//6, h//3)
-        x1 = random.randint(0, w - bw)
-        y1 = random.randint(0, h - bh)
-        conf = random.uniform(0.42, 0.94)
-        detections.append({
-            'box': (x1, y1, x1+bw, y1+bh),
-            'class': cls_name, 'confidence': conf,
-            'class_idx': LOGO_CLASSES.index(cls_name),
-        })
-    annotated = draw_detections(image_np, detections)
-    return annotated, detections
+    h, w  = image_np.shape[:2]
+    img_a = h * w
+    rng   = random.Random(int(np.mean(image_np)))
+    pool  = list(FOOD_CLASSES)
+    dets  = []
+    for _ in range(rng.randint(2,4)):
+        cls  = rng.choice(pool)
+        bw   = rng.randint(w//5, w//2)
+        bh   = rng.randint(h//6, h//3)
+        x1   = rng.randint(0, max(1,w-bw))
+        y1   = rng.randint(0, max(1,h-bh))
+        conf = rng.uniform(0.44,0.93)
+        wt   = estimate_weight(cls, bw*bh, img_a)
+        n100 = lookup_nutrition(cls, csv_df)
+        nutr = {k: round(v*wt/100, 1) for k,v in n100.items()}
+        dets.append({"box":(x1,y1,x1+bw,y1+bh),"class":cls,
+            "confidence":conf,"weight_g":wt,
+            "nutrition_per100g":n100,"nutrition":nutr})
+    return draw_boxes(image_np, dets), dets
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ═════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown('<div style="text-align:center;font-size:2.5rem">🔍</div>',
-                unsafe_allow_html=True)
-    st.markdown('### Logo Detector', unsafe_allow_html=False)
-    st.markdown('---')
-
-    # Model section
-    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    st.markdown('**🤖 Model**')
-
+    st.markdown("## ⚙️ Settings")
+    st.markdown("---")
+    conf_thresh = st.slider("Confidence threshold", 0.10, 0.95, 0.30, 0.05)
+    iou_thresh  = st.slider("IoU (NMS) threshold",  0.10, 0.95, 0.45, 0.05)
+    food_only   = st.toggle("Food items only", value=True,
+                            help="Hide non-food COCO detections")
+    st.markdown("---")
+    st.markdown("### 📂 Nutrition Dataset")
+    csv_df = load_nutrition_csv(DATASET_PATH)
+    if csv_df is not None:
+        st.success(f"✓ nutrition.csv loaded ({len(csv_df):,} items)")
+    else:
+        st.warning("nutrition.csv not found")
+        st.caption("Download from Kaggle → save as `data/nutrition.csv` next to app.py")
+    st.markdown("---")
+    st.markdown("### 🤖 Model")
     if not YOLO_AVAILABLE:
-        st.markdown('<span class="status-err">⚠ ultralytics not installed</span>',
-                    unsafe_allow_html=True)
-        st.code('pip install ultralytics', language='bash')
-        demo_mode = True
-    elif not MODEL_PATH.exists():
-        st.markdown('<span class="status-warn">⚠ model/best.pt not found</span>',
-                    unsafe_allow_html=True)
-        st.markdown('<div class="info-box">Download best.pt from Kaggle and place it in the <code>model/</code> folder.</div>',
-                    unsafe_allow_html=True)
-        demo_mode = True
+        st.error("ultralytics not installed")
+        st.code("pip install ultralytics")
     else:
-        st.markdown('<span class="status-ok">✓ Model loaded</span>',
-                    unsafe_allow_html=True)
-        demo_mode = False
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # Detection settings
-    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    st.markdown('**⚙️ Detection Settings**')
-
-    conf_thresh = st.slider('Confidence threshold', 0.10, 0.95, 0.35, 0.05)
-    iou_thresh  = st.slider('IoU (NMS) threshold',  0.10, 0.95, 0.45, 0.05)
-
-    use_gan_aug = st.toggle('🧬 GAN-augmented model', value=True,
-                            help='Use model trained with GAN-generated data')
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # Info
-    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    st.markdown('**📦 Supported Classes**')
-    cols = st.columns(2)
-    for i, cls in enumerate(LOGO_CLASSES):
-        cols[i % 2].markdown(f'`{cls}`')
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    if demo_mode:
-        st.info('🎮 Running in **demo mode** — install ultralytics and add best.pt for real inference.')
+        st.success("YOLOv8n ready  (auto-downloads ~6 MB)")
+    st.markdown("---")
+    st.markdown("### 📦 Detectable Food")
+    for fc in sorted(FOOD_CLASSES):
+        st.caption(f"• {fc}")
 
 
-# ── Header ────────────────────────────────────────────────────────────────────
-st.markdown(
-    '<h1 class="hero-title">Logo Detector</h1>'
-    '<p class="hero-sub">GAN-Augmented YOLOv8 · Real-time brand recognition</p>',
-    unsafe_allow_html=True
+# ═════════════════════════════════════════════════════════════════════════════
+# HERO
+# ═════════════════════════════════════════════════════════════════════════════
+st.markdown("""
+<div class="hero">
+  <div class="hero-eyebrow">YOLOv8 · Computer Vision · Nutrition AI</div>
+  <h1 class="hero-title">Smart Nutrition<br>Detection System</h1>
+  <p class="hero-sub">
+    Upload a food photo — YOLO detects every item, estimates portion weight,
+    and maps it to detailed nutritional data in real time.
+  </p>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# UPLOAD
+# ═════════════════════════════════════════════════════════════════════════════
+st.markdown('<div class="sec-head"><span>📷</span> Upload Food Image</div>',
+            unsafe_allow_html=True)
+
+uploaded = st.file_uploader(
+    "Drag & drop or click to browse",
+    type=["jpg","jpeg","png","webp","bmp"],
+    label_visibility="collapsed",
 )
-st.markdown('---')
 
-# ── Load model (cached) ───────────────────────────────────────────────────────
-model = None
-if not demo_mode:
-    with st.spinner('Loading model weights…'):
-        try:
-            model = load_model(str(MODEL_PATH))
-        except Exception as e:
-            st.error(f'Failed to load model: {e}')
-            demo_mode = True
-
-
-# ── Upload ────────────────────────────────────────────────────────────────────
-col_up, col_info = st.columns([3, 1])
-
-with col_up:
-    uploaded = st.file_uploader(
-        'Upload an image',
-        type=['jpg', 'jpeg', 'png', 'webp', 'bmp'],
-        label_visibility='collapsed',
-        help='Drop an image containing logos'
-    )
-
-with col_info:
-    st.markdown(
-        '<div class="info-box">'
-        'Supports JPEG, PNG, WebP.<br>'
-        'Best results on images ≥ 400 px.'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-
-# ── Inference ─────────────────────────────────────────────────────────────────
-if uploaded:
-    # Use Pillow to open image — no cv2 needed
-    try:
-        image_pil = Image.open(uploaded).convert("RGB")
-    except Exception:
-        st.error('Could not decode image. Please try another file.')
-        st.stop()
-
-    image_rgb = np.array(image_pil)
-    w, h = image_pil.size
-
-    # Run
-    t0 = time.perf_counter()
-    with st.spinner('Detecting logos…'):
-        if demo_mode:
-            annotated, detections = demo_inference(image_rgb)
-        else:
-            annotated, detections = run_inference(
-                model, image_rgb, conf_thresh, iou_thresh)
-    elapsed_ms = (time.perf_counter() - t0) * 1000
-
-    # ── Metrics row ───────────────────────────────────────────────────────────
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.markdown(
-            f'<div class="metric-card"><div class="metric-value">{len(detections)}</div>'
-            f'<div class="metric-label">Logos Detected</div></div>',
-            unsafe_allow_html=True)
-    with m2:
-        avg_conf = np.mean([d['confidence'] for d in detections]) if detections else 0
-        st.markdown(
-            f'<div class="metric-card"><div class="metric-value">{avg_conf:.0%}</div>'
-            f'<div class="metric-label">Avg Confidence</div></div>',
-            unsafe_allow_html=True)
-    with m3:
-        st.markdown(
-            f'<div class="metric-card"><div class="metric-value">{elapsed_ms:.0f}ms</div>'
-            f'<div class="metric-label">Inference Time</div></div>',
-            unsafe_allow_html=True)
-    with m4:
-        model_tag = 'GAN-Aug' if use_gan_aug else 'Baseline'
-        st.markdown(
-            f'<div class="metric-card"><div class="metric-value" style="font-size:1.3rem">{model_tag}</div>'
-            f'<div class="metric-label">Model Variant</div></div>',
-            unsafe_allow_html=True)
-
-    st.markdown('---')
-
-    # ── Image columns ─────────────────────────────────────────────────────────
-    col_orig, col_det = st.columns(2, gap='medium')
-    with col_orig:
-        st.markdown('**Original Image**')
-        st.image(image_rgb, use_column_width=True)
-        st.caption(f'{w} × {h} px  ·  {uploaded.name}')
-
-    with col_det:
-        st.markdown('**Detected Logos**')
-        st.image(annotated, use_column_width=True)
-        if demo_mode:
-            st.caption('⚠️ Demo mode — fake detections shown')
-
-    st.markdown('---')
-
-    # ── Detection list ────────────────────────────────────────────────────────
-    if detections:
-        st.markdown(f'### Detections  `{len(detections)} found`')
-        cols = st.columns(min(len(detections), 4))
-        for i, det in enumerate(detections):
-            with cols[i % 4]:
-                cc = get_conf_class(det['confidence'])
-                x1, y1, x2, y2 = det['box']
-                st.markdown(
-                    f'<div class="metric-card" style="margin-bottom:8px">'
-                    f'<div style="font-size:1.4rem">🏷️</div>'
-                    f'<div style="font-weight:700;color:#e2e8f0;margin:4px 0">'
-                    f'{det["class"].upper()}</div>'
-                    f'<span class="detection-badge {cc}">'
-                    f'{det["confidence"]:.1%}</span><br>'
-                    f'<div style="color:#4a5568;font-size:0.78rem;margin-top:6px;'
-                    f'font-family:JetBrains Mono,monospace">'
-                    f'[{x1},{y1}] → [{x2},{y2}]</div>'
-                    f'</div>',
-                    unsafe_allow_html=True
-                )
-    else:
-        st.info('No logos detected at the current confidence threshold. '
-                'Try lowering the threshold in the sidebar.')
-
-    st.markdown('---')
-
-    # ── Download annotated image ──────────────────────────────────────────────
-    annotated_pil = Image.fromarray(annotated)
-    buf = io.BytesIO()
-    annotated_pil.save(buf, format='PNG')
-    st.download_button(
-        label='⬇️  Download annotated image',
-        data=buf.getvalue(),
-        file_name='logo_detection_result.png',
-        mime='image/png',
-        use_container_width=False,
-    )
-
-else:
-    # ── Empty state ───────────────────────────────────────────────────────────
+if not uploaded:
     st.markdown("""
-    <div style="text-align:center;padding:60px 20px;color:#4a5568">
-        <div style="font-size:4rem;margin-bottom:16px">📷</div>
-        <div style="font-size:1.2rem;font-weight:600;color:#718096">
-            Upload an image to detect logos
+    <div style="text-align:center;padding:64px 20px;color:#9e8060;">
+      <div style="font-size:4.5rem;margin-bottom:18px;">🍽️</div>
+      <div style="font-family:'Playfair Display',serif;font-size:1.4rem;
+                  font-weight:700;color:#3b2110;margin-bottom:8px;">
+          No image uploaded yet
+      </div>
+      <div style="font-size:0.92rem;">Supports JPEG · PNG · WebP · BMP</div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.stop()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PROCESS IMAGE
+# ═════════════════════════════════════════════════════════════════════════════
+try:
+    pil_img = Image.open(uploaded).convert("RGB")
+except Exception:
+    st.error("Could not open image. Please try another file.")
+    st.stop()
+
+image_np = np.array(pil_img)
+img_w, img_h = pil_img.size
+
+model     = load_yolo()
+demo_mode = (model is None)
+
+with st.spinner("🔍 Detecting food items…"):
+    t0 = time.perf_counter()
+    if demo_mode:
+        annotated, detections = demo_run(image_np, csv_df, food_only)
+    else:
+        annotated, detections = run_yolo(
+            model, image_np, conf_thresh, iou_thresh, csv_df, food_only)
+    elapsed = (time.perf_counter() - t0) * 1000
+
+if demo_mode:
+    st.info("⚠️ **Demo mode** — install `ultralytics` for real YOLOv8 inference.")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 1 — IMAGES
+# ═════════════════════════════════════════════════════════════════════════════
+st.markdown("---")
+st.markdown('<div class="sec-head"><span>🖼️</span> Detection Output</div>',
+            unsafe_allow_html=True)
+
+col_a, col_b = st.columns(2, gap="large")
+with col_a:
+    st.markdown("**Original Image**")
+    st.image(image_np, use_column_width=True)
+    st.caption(f"{img_w} × {img_h} px · {uploaded.name}")
+with col_b:
+    st.markdown("**Annotated Image**")
+    st.image(annotated, use_column_width=True)
+    st.caption(f"Inference: {elapsed:.0f} ms · {len(detections)} detection(s)")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 2 — DETECTED ITEMS
+# ═════════════════════════════════════════════════════════════════════════════
+st.markdown("---")
+st.markdown('<div class="sec-head"><span>🔎</span> Detected Food Items</div>',
+            unsafe_allow_html=True)
+
+if not detections:
+    st.info("No food items detected. Try lowering the confidence threshold in the sidebar.")
+    st.stop()
+
+for i, d in enumerate(detections, 1):
+    conf      = d["confidence"]
+    conf_cls  = "conf-h" if conf>=0.70 else ("conf-m" if conf>=0.45 else "conf-l")
+    n         = d["nutrition"]
+    x1,y1,x2,y2 = d["box"]
+
+    # lookup source label
+    src_label = "CSV" if (csv_df is not None and
+                          not csv_df[csv_df["name_lower"].str.contains(
+                              d["class"].lower(), na=False)].empty) else "Built-in"
+
+    st.markdown(f"""
+    <div style="background:#faf6f0;border:1px solid #ead9be;
+         border-radius:14px;padding:16px 20px;margin-bottom:10px;">
+      <div style="display:flex;align-items:center;
+                  justify-content:space-between;flex-wrap:wrap;gap:8px;">
+        <div>
+          <div style="font-family:'Playfair Display',serif;font-size:1.1rem;
+               font-weight:700;color:#1c1409;text-transform:capitalize;">
+            {i}. {d['class']}
+          </div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.78rem;
+               color:#8c6d4f;margin-top:3px;">
+            Box [{x1},{y1}]→[{x2},{y2}] &nbsp;·&nbsp;
+            ~{d['weight_g']} g estimated &nbsp;·&nbsp; data: {src_label}
+          </div>
         </div>
-        <div style="font-size:0.9rem;margin-top:8px">
-            Supports: JPEG · PNG · WebP · BMP
-        </div>
+        <span class="conf {conf_cls}">{conf:.1%}</span>
+      </div>
+      <div class="macro-strip">
+        <span class="macro-chip mc-cal">🔥 {n['calories']} kcal</span>
+        <span class="macro-chip mc-carb">🍞 {n['carbohydrates']} g carbs</span>
+        <span class="macro-chip mc-prot">💪 {n['proteins']} g protein</span>
+        <span class="macro-chip mc-fat">🧈 {n['fat']} g fat</span>
+        <span class="macro-chip mc-fib">🌿 {n['fiber']} g fiber</span>
+      </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── How it works ──────────────────────────────────────────────────────────
-    st.markdown('---')
-    st.markdown('### How it works')
-    e1, e2, e3, e4 = st.columns(4)
-    steps = [
-        ('1', '🖼️', 'GAN Training', 'DCGAN learns the visual distribution of logos and generates synthetic variants.'),
-        ('2', '🔀', 'Data Augmentation', 'Synthetic GAN images are merged with real data to expand the training set.'),
-        ('3', '🎯', 'YOLOv8 Detection', 'YOLOv8n is trained end-to-end on the augmented dataset for fast, accurate detection.'),
-        ('4', '🚀', 'Inference', 'Upload any image and get instant logo detections with bounding boxes and confidence scores.'),
-    ]
-    for col, (num, icon, title, desc) in zip([e1, e2, e3, e4], steps):
-        col.markdown(
-            f'<div class="metric-card" style="text-align:left">'
-            f'<div style="font-size:2rem">{icon}</div>'
-            f'<div style="font-weight:700;color:#e2e8f0;margin:8px 0 4px">{title}</div>'
-            f'<div style="color:#6b7280;font-size:0.85rem">{desc}</div>'
-            f'</div>',
-            unsafe_allow_html=True
-        )
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 3 — NUTRITION SUMMARY
+# ═════════════════════════════════════════════════════════════════════════════
+st.markdown("---")
+st.markdown('<div class="sec-head"><span>📊</span> Nutrition Summary</div>',
+            unsafe_allow_html=True)
+
+total_cal  = round(sum(d["nutrition"]["calories"]      for d in detections), 1)
+total_prot = round(sum(d["nutrition"]["proteins"]       for d in detections), 1)
+total_carb = round(sum(d["nutrition"]["carbohydrates"]  for d in detections), 1)
+total_fat  = round(sum(d["nutrition"]["fat"]            for d in detections), 1)
+total_fib  = round(sum(d["nutrition"]["fiber"]          for d in detections), 1)
+total_wt   = round(sum(d["weight_g"]                    for d in detections), 1)
+daily_pct  = round(total_cal / 2000 * 100, 1)
+
+# big calorie card
+st.markdown(f"""
+<div class="cal-hero">
+  <div>
+    <div class="cal-label">Total Calories</div>
+    <div><span class="cal-num">{total_cal:.0f}</span>
+         <span class="cal-unit">kcal</span></div>
+    <div class="cal-note">≈ {daily_pct}% of 2,000 kcal daily reference</div>
+  </div>
+  <div style="text-align:right;">
+    <div class="cal-label">Est. Total Weight</div>
+    <div style="font-family:'Playfair Display',serif;font-size:2rem;
+         font-weight:700;color:#fff;line-height:1;">{total_wt:.0f} g</div>
+    <div class="cal-note">{len(detections)} item(s)</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+# table
+rows = []
+for d in detections:
+    n = d["nutrition"]
+    rows.append({
+        "Food Item":       d["class"].title(),
+        "Conf.":           f"{d['confidence']:.1%}",
+        "Weight (g)":      d["weight_g"],
+        "Calories (kcal)": round(n["calories"],1),
+        "Protein (g)":     round(n["proteins"],1),
+        "Carbs (g)":       round(n["carbohydrates"],1),
+        "Fat (g)":         round(n["fat"],1),
+        "Fiber (g)":       round(n["fiber"],1),
+    })
+rows.append({
+    "Food Item":"🔢 TOTAL","Conf.":"—",
+    "Weight (g)":total_wt,"Calories (kcal)":total_cal,
+    "Protein (g)":total_prot,"Carbs (g)":total_carb,
+    "Fat (g)":total_fat,"Fiber (g)":total_fib,
+})
+
+df_out = pd.DataFrame(rows)
+st.dataframe(
+    df_out, use_container_width=True, hide_index=True,
+    column_config={
+        "Calories (kcal)": st.column_config.NumberColumn(format="%.1f 🔥"),
+        "Weight (g)":      st.column_config.NumberColumn(format="%.1f g"),
+    },
+)
+
+# macro bar chart
+st.markdown("#### Macronutrient breakdown")
+macro_df = pd.DataFrame({
+    "Macro": ["Carbohydrates","Protein","Fat","Fiber"],
+    "Grams": [total_carb, total_prot, total_fat, total_fib],
+})
+st.bar_chart(macro_df.set_index("Macro"), color="#d4a359", use_container_width=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DOWNLOADS
+# ═════════════════════════════════════════════════════════════════════════════
+st.markdown("---")
+c1, c2 = st.columns(2)
+with c1:
+    buf = io.BytesIO()
+    Image.fromarray(annotated).save(buf, format="PNG")
+    st.download_button("⬇️ Download annotated image", buf.getvalue(),
+                       "nutrition_detection.png", "image/png",
+                       use_container_width=True)
+with c2:
+    st.download_button("⬇️ Download nutrition CSV",
+                       df_out.to_csv(index=False).encode(),
+                       "nutrition_summary.csv", "text/csv",
+                       use_container_width=True)
+
+st.markdown("""
+<div class="tip">
+  💡 <b>Tip:</b> Download the nutrition dataset from
+  <a href="https://www.kaggle.com/datasets/gokulprasantht/nutrition-dataset"
+     target="_blank" style="color:#6b4226;">Kaggle</a>
+  and save it as <code>data/nutrition.csv</code> beside <code>app.py</code>
+  for richer lookups. The built-in table is used as fallback.
+</div>
+""", unsafe_allow_html=True)
