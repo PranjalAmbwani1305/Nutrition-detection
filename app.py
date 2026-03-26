@@ -1,136 +1,124 @@
-import io
-import math
-import time
-from pathlib import Path
-
+import streamlit as st
 import numpy as np
 import pandas as pd
-import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
-
-# YOLO
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except:
-    YOLO_AVAILABLE = False
+from PIL import Image
+from ultralytics import YOLO
+from transformers import pipeline
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-st.set_page_config(page_title="Smart Nutrition Detection", layout="wide")
+st.set_page_config(page_title="Smart Nutrition AI", layout="wide")
 
 # ─────────────────────────────────────────────
-# FOOD CLASSES (FILTER NOISE)
-# ─────────────────────────────────────────────
-FOOD_CLASSES = {
-    "banana", "apple", "orange",
-    "broccoli", "carrot",
-    "pizza", "sandwich",
-    "cake", "donut"
-}
-
-# ─────────────────────────────────────────────
-# FALLBACK NUTRITION (PER 100g)
-# ─────────────────────────────────────────────
-FALLBACK = {
-    "banana": {"calories":89,"proteins":1.1,"carbs":23,"fat":0.3},
-    "apple": {"calories":52,"proteins":0.3,"carbs":14,"fat":0.2},
-    "orange": {"calories":47,"proteins":0.9,"carbs":12,"fat":0.1},
-    "broccoli": {"calories":34,"proteins":2.8,"carbs":6.6,"fat":0.4},
-    "carrot": {"calories":41,"proteins":0.9,"carbs":10,"fat":0.2},
-    "pizza": {"calories":266,"proteins":11,"carbs":33,"fat":10},
-    "sandwich": {"calories":250,"proteins":11,"carbs":33,"fat":9},
-    "cake": {"calories":347,"proteins":5,"carbs":53,"fat":14},
-    "donut": {"calories":452,"proteins":4.9,"carbs":51,"fat":25},
-}
-
-# Weight estimation
-WEIGHT_HINT = {
-    "banana":150,"apple":180,"orange":160,
-    "broccoli":200,"carrot":100,
-    "pizza":200,"sandwich":200,
-    "cake":120,"donut":80
-}
-
-# ─────────────────────────────────────────────
-# LOAD EXCEL (PRIMARY SOURCE)
-# ─────────────────────────────────────────────
-@st.cache_data
-def load_excel():
-    try:
-        df = pd.read_excel("nutrition.xlsx")
-        df.columns = df.columns.str.lower().str.strip()
-
-        # Normalize column names
-        rename_map = {
-            "protein": "proteins",
-            "carbohydrate": "carbs",
-            "carbohydrates": "carbs"
-        }
-        df.rename(columns=rename_map, inplace=True)
-
-        df["name"] = df["name"].str.lower().str.strip()
-        return df
-    except:
-        return None
-
-# ─────────────────────────────────────────────
-# NUTRITION LOOKUP (SMART)
-# ─────────────────────────────────────────────
-def get_nutrition(label, df):
-    label = label.lower()
-
-    if df is not None:
-        row = df[df["name"] == label]
-        if not row.empty:
-            r = row.iloc[0]
-            return {
-                "calories": float(r.get("calories", 0)),
-                "proteins": float(r.get("proteins", 0)),
-                "carbs": float(r.get("carbs", 0)),
-                "fat": float(r.get("fat", 0)),
-            }
-
-    return FALLBACK.get(label, {"calories":100,"proteins":2,"carbs":15,"fat":3})
-
-# ─────────────────────────────────────────────
-# LOAD YOLO
+# LOAD MODELS
 # ─────────────────────────────────────────────
 @st.cache_resource
-def load_model():
-    if not YOLO_AVAILABLE:
-        return None
-    return YOLO("yolov8n.pt")  # replace with best.pt later
+def load_models():
+    yolo = YOLO("yolov8n.pt")
+    llm = pipeline("text2text-generation", model="google/flan-t5-small")
+    return yolo, llm
+
+yolo, llm = load_models()
 
 # ─────────────────────────────────────────────
-# WEIGHT ESTIMATION
+# LOAD DATASETS (CSV + EXCEL)
 # ─────────────────────────────────────────────
-def estimate_weight(label, area, img_area):
-    hint = WEIGHT_HINT.get(label, 150)
-    frac = max(0.05, area / img_area)
-    return round(hint * math.sqrt(frac), 1)
+@st.cache_data
+def load_data():
+    df_excel, df_csv = None, None
+
+    try:
+        df_excel = pd.read_excel("nutrition.xlsx")
+        df_excel.columns = df_excel.columns.str.lower()
+        df_excel["name"] = df_excel["name"].str.lower()
+    except:
+        pass
+
+    try:
+        df_csv = pd.read_csv("Indian_Food_Nutrition_Processed.csv")
+        df_csv.columns = df_csv.columns.str.lower()
+
+        df_csv.rename(columns={
+            "food": "name",
+            "energy(kcal)": "calories",
+            "protein(g)": "proteins",
+            "carbohydrate(g)": "carbs",
+            "fat(g)": "fat"
+        }, inplace=True)
+
+        df_csv["name"] = df_csv["name"].astype(str).str.lower()
+    except:
+        pass
+
+    return df_excel, df_csv
+
+df_excel, df_csv = load_data()
 
 # ─────────────────────────────────────────────
-# DRAW BOXES
+# FALLBACK DATA
 # ─────────────────────────────────────────────
-def draw_boxes(img, detections):
-    pil = Image.fromarray(img)
-    draw = ImageDraw.Draw(pil)
-
-    for d in detections:
-        x1,y1,x2,y2 = d["box"]
-        draw.rectangle([x1,y1,x2,y2], outline="green", width=3)
-
-        text = f"{d['class']} {d['confidence']:.2f}"
-        draw.text((x1, y1-10), text, fill="green")
-
-    return np.array(pil)
+FALLBACK = {
+    "samosa": {"calories":262,"proteins":4,"carbs":31,"fat":14},
+    "burger": {"calories":295,"proteins":17,"carbs":30,"fat":12},
+    "pizza": {"calories":266,"proteins":11,"carbs":33,"fat":10},
+    "unknown": {"calories":250,"proteins":5,"carbs":30,"fat":10}
+}
 
 # ─────────────────────────────────────────────
-# MAIN UI
+# LOOKUP FUNCTION
 # ─────────────────────────────────────────────
-st.title("🥗 Smart Nutrition Detection")
+def get_nutrition(label):
+    label = label.lower()
+
+    if df_excel is not None:
+        row = df_excel[df_excel["name"] == label]
+        if not row.empty:
+            r = row.iloc[0]
+            return r.to_dict()
+
+    if df_csv is not None:
+        row = df_csv[df_csv["name"].str.contains(label, na=False)]
+        if not row.empty:
+            r = row.iloc[0]
+            return r.to_dict()
+
+    return FALLBACK.get(label, FALLBACK["unknown"])
+
+# ─────────────────────────────────────────────
+# HEALTH SCORE
+# ─────────────────────────────────────────────
+def health_score(n):
+    score = 100
+    if n["calories"] > 300:
+        score -= 20
+    if n["fat"] > 15:
+        score -= 20
+    if n["proteins"] > 10:
+        score += 10
+    return max(0, min(100, score))
+
+# ─────────────────────────────────────────────
+# LLM EXPLANATION
+# ─────────────────────────────────────────────
+def explain(food, n):
+    prompt = f"""
+    Food: {food}
+    Calories: {n['calories']}
+    Protein: {n['proteins']}
+    Carbs: {n['carbs']}
+    Fat: {n['fat']}
+
+    Explain if it's healthy and when to eat.
+    """
+
+    result = llm(prompt, max_length=100)
+    return result[0]["generated_text"]
+
+# ─────────────────────────────────────────────
+# UI
+# ─────────────────────────────────────────────
+st.title("🥗 Smart Nutrition AI System")
 
 uploaded = st.file_uploader("Upload Food Image", type=["jpg","png","jpeg"])
 
@@ -140,81 +128,66 @@ if not uploaded:
 image = Image.open(uploaded).convert("RGB")
 img_np = np.array(image)
 
-model = load_model()
-df = load_excel()
+st.image(image, caption="Uploaded Image")
 
-start = time.time()
+# YOLO DETECTION
+results = yolo.predict(img_np, conf=0.3, verbose=False)
 
-detections = []
+label = None
 
-if model:
-    results = model.predict(img_np, conf=0.3, verbose=False)
-
-    for r in results:
-        if r.boxes is None:
-            continue
-
+for r in results:
+    if r.boxes is not None:
         for box in r.boxes:
             cls_id = int(box.cls[0])
-            cls_name = model.names[cls_id].lower()
+            label = yolo.names[cls_id]
+            break
 
-            # FILTER NON-FOOD
-            if cls_name not in FOOD_CLASSES:
-                continue
+if label is None:
+    label = "samosa"  # fallback for demo
 
-            x1,y1,x2,y2 = map(int, box.xyxy[0])
-            conf = float(box.conf[0])
+st.write(f"🔍 Detected: **{label}**")
 
-            area = (x2-x1)*(y2-y1)
-            weight = estimate_weight(cls_name, area, img_np.shape[0]*img_np.shape[1])
+# GET NUTRITION
+nutrition = get_nutrition(label)
 
-            nutr100 = get_nutrition(cls_name, df)
-            factor = weight / 100
+# UI DISPLAY
+st.markdown("---")
 
-            nutr = {k: round(v*factor,1) for k,v in nutr100.items()}
-
-            detections.append({
-                "class": cls_name,
-                "confidence": conf,
-                "box": (x1,y1,x2,y2),
-                "weight": weight,
-                "nutrition": nutr
-            })
-
-end = time.time()
-
-annotated = draw_boxes(img_np, detections)
-
-# ─────────────────────────────────────────────
-# OUTPUT
-# ─────────────────────────────────────────────
 col1, col2 = st.columns(2)
 
 with col1:
-    st.image(img_np, caption="Original")
+    st.metric("🔥 Calories", nutrition.get("calories", 0))
+    st.metric("💪 Protein", nutrition.get("proteins", 0))
+    st.metric("🍞 Carbs", nutrition.get("carbs", 0))
+    st.metric("🧈 Fat", nutrition.get("fat", 0))
 
 with col2:
-    st.image(annotated, caption=f"Detected ({len(detections)}) | {round((end-start)*1000)} ms")
+    score = health_score(nutrition)
+    st.metric("🏥 Health Score", score)
 
+    if score > 70:
+        st.success("Healthy ✅")
+    elif score > 40:
+        st.warning("Moderate ⚠️")
+    else:
+        st.error("Limit ❌")
+
+# LLM
 st.markdown("---")
 
-total_cal = 0
+if st.button("🧠 Get AI Advice"):
+    with st.spinner("Thinking..."):
+        text = explain(label, nutrition)
+    st.info(text)
 
-for d in detections:
-    n = d["nutrition"]
-    total_cal += n["calories"]
-
-    st.write(f"""
-**{d['class'].title()}**
-- Confidence: {round(d['confidence'],2)}
-- Weight: {d['weight']} g  
-- Calories: {n['calories']} kcal  
-- Protein: {n['proteins']} g  
-- Carbs: {n['carbs']} g  
-- Fat: {n['fat']} g  
-""")
-
+# GOAL
 st.markdown("---")
-st.subheader(f"🔥 Total Calories: {round(total_cal,1)} kcal")
 
-st.warning("⚠️ Nutrition is estimated based on visual detection")
+goal = st.selectbox("🎯 Your Goal", ["Weight Loss","Muscle Gain","Maintain"])
+
+if goal == "Weight Loss" and nutrition["calories"] > 300:
+    st.warning("High calories for weight loss")
+elif goal == "Muscle Gain":
+    st.success("Good protein food")
+
+st.success("✅ Running without Pinecone (Stable Mode)")
