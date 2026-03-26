@@ -1,18 +1,8 @@
-"""
-Logo Detection — Streamlit Inference App
-=========================================
-Upload an image and detect logos using the YOLOv8 model trained on Kaggle.
-
-Usage:
-    streamlit run app.py
-"""
-
 import io
 import time
 import zipfile
 from pathlib import Path
 
-import cv2
 import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
@@ -137,9 +127,19 @@ def get_conf_class(conf: float) -> str:
 
 
 def draw_detections(image_np: np.ndarray, detections: list) -> np.ndarray:
-    """Draw bounding boxes and labels on image."""
-    img = image_np.copy()
-    h, w = img.shape[:2]
+    """Draw bounding boxes and labels on image using Pillow."""
+    img_pil = Image.fromarray(image_np)
+    draw = ImageDraw.Draw(img_pil)
+    h, w = image_np.shape[:2]
+
+    # Try to load a truetype font; fall back to default
+    try:
+        font_size = max(12, int(min(h, w) / 40))
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+    except Exception:
+        font = ImageFont.load_default()
+
+    thickness = max(2, int(min(h, w) / 300))
 
     for det in detections:
         x1, y1, x2, y2 = det['box']
@@ -147,28 +147,22 @@ def draw_detections(image_np: np.ndarray, detections: list) -> np.ndarray:
         conf     = det['confidence']
 
         color = CLASS_COLORS.get(cls_name, (0, 200, 255))
-        color_bgr = (color[2], color[1], color[0])
 
         # Bounding box
-        thickness = max(2, int(min(h, w) / 300))
-        cv2.rectangle(img, (x1, y1), (x2, y2), color_bgr, thickness)
+        for t in range(thickness):
+            draw.rectangle([x1 - t, y1 - t, x2 + t, y2 + t], outline=color)
 
-        # Label background
+        # Label text
         label = f'{cls_name.upper()}  {conf:.0%}'
-        font_scale = max(0.45, min(h, w) / 1200)
-        (tw, th), baseline = cv2.getTextSize(
-            label, cv2.FONT_HERSHEY_DUPLEX, font_scale, 1)
-        label_y = max(y1 - 6, th + 4)
-        cv2.rectangle(img,
-                      (x1, label_y - th - baseline - 4),
-                      (x1 + tw + 8, label_y + 2),
-                      color_bgr, -1)
-        cv2.putText(img, label,
-                    (x1 + 4, label_y - baseline),
-                    cv2.FONT_HERSHEY_DUPLEX, font_scale,
-                    (255, 255, 255), 1, cv2.LINE_AA)
+        bbox = draw.textbbox((0, 0), label, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
 
-    return img
+        label_y = max(y1 - th - 6, 0)
+        draw.rectangle([x1, label_y, x1 + tw + 8, label_y + th + 4], fill=color)
+        draw.text((x1 + 4, label_y + 2), label, fill=(255, 255, 255), font=font)
+
+    return np.array(img_pil)
 
 
 def run_inference(model, image_np: np.ndarray, conf_thresh: float,
@@ -320,14 +314,15 @@ with col_info:
 
 # ── Inference ─────────────────────────────────────────────────────────────────
 if uploaded:
-    file_bytes = np.frombuffer(uploaded.read(), dtype=np.uint8)
-    image_bgr  = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    if image_bgr is None:
+    # Use Pillow to open image — no cv2 needed
+    try:
+        image_pil = Image.open(uploaded).convert("RGB")
+    except Exception:
         st.error('Could not decode image. Please try another file.')
         st.stop()
 
-    image_rgb  = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    h, w       = image_rgb.shape[:2]
+    image_rgb = np.array(image_pil)
+    w, h = image_pil.size
 
     # Run
     t0 = time.perf_counter()
